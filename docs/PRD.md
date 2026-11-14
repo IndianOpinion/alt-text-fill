@@ -125,7 +125,7 @@ Terms used below:
    (`image`, `photo`, `picture`, `img`, `untitled`, `placeholder`) is also
    treated as empty. The list is a filter. A weak-alt suggestion shows the
    current value prominently on the review list, and undo restores it.
-6. An attachment marked decorative (case 33) is never a candidate.
+6. An attachment marked decorative (case 46) is never a candidate.
 7. An attachment whose alt was written, rejected or undone by this plugin
    is not picked again by a scheduled run unless the operator asks
    (`--include-rejected`, or "Try again" on the item). Rejection is a
@@ -770,7 +770,7 @@ layer, the fake adapter and a mock HTTP layer. No network.
 | T74 | Unreadable settings: switch treated as on and a notice shown | 77 |
 | T75 | API key never appears in logs, errors or the settings page beyond four characters | 8 (section) |
 | T76 | Uninstall drops tables, options and own meta and leaves every alt value unchanged | 6 (section) |
-| T77 | Table upgrade verifies columns and warns when one is missing | 6 (section), rule 14 |
+| T77 | Table upgrade verifies columns and warns when one is missing | 6 (section), lesson 14 |
 | T78 | CLI exit codes 0, 1, 2 and 3 | 5.6 |
 
 ## 13. Open questions
@@ -804,8 +804,8 @@ To be answered by the builder in `docs/ARCHITECTURE.md`:
 
 ## 14. Lessons from production
 
-Written as rules. They come from running an image pipeline on a busy news
-site and from general WordPress practice.
+Written as rules. They come from running image description on a busy WordPress
+publication and from general WordPress practice.
 
 1. Never use the post title as alt text, and reject a model answer that
    is a near copy of it. A headline in the alt field says what the story
