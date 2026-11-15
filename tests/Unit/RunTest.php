@@ -388,8 +388,8 @@ final class RunTest extends TestCase
     public function testT72AdapterRuntimeErrorIsCaughtAndLoggedRedacted(): void
     {
         $this->images(2);
-        \IndianOpinion\AltTextFill\Redactor::register('sk-secretsecretsecret99');
-        $this->fake->push(new \TypeError('bad thing with key sk-secretsecretsecret99 and Bearer abc.def'), $this->answer('A pier'));
+        \IndianOpinion\AltTextFill\Redactor::register('fake-secret-value-99');
+        $this->fake->push(new \TypeError('bad thing with key fake-secret-value-99 and Bearer abc.def'), $this->answer('A pier'));
 
         $report = $this->runReal();
 
@@ -397,7 +397,7 @@ final class RunTest extends TestCase
         self::assertSame(1, $report->count('suggestions'));
         $log = implode("\n", $this->logger->written);
         self::assertStringContainsString('TypeError', $log);
-        self::assertStringNotContainsString('sk-secretsecretsecret99', $log);
+        self::assertStringNotContainsString('fake-secret-value-99', $log);
         self::assertStringNotContainsString('abc.def', $log);
         self::assertStringContainsString('[redacted]', $log);
     }

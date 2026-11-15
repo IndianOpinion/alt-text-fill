@@ -22,7 +22,7 @@ final class ModelCallTest extends TestCase
     /** @return array<string, mixed> */
     private function adapterSettings(): array
     {
-        return ['base_url' => 'https://api.example.com/v1/', 'model' => 'vision-small', 'api_key' => 'sk-testkey1234567890abcd', 'extra_headers' => "X-Title: My site", 'json_mode' => true, 'timeout' => 30, 'max_tokens' => 200, 'temperature' => 0.2];
+        return ['base_url' => 'https://api.example.com/v1/', 'model' => 'vision-small', 'api_key' => 'fake-key-1234567890abcd', 'extra_headers' => "X-Title: My site", 'json_mode' => true, 'timeout' => 30, 'max_tokens' => 200, 'temperature' => 0.2];
     }
 
     private function input(): ImageInput
@@ -49,7 +49,7 @@ final class ModelCallTest extends TestCase
         self::assertSame(['type' => 'json_object'], $body['response_format']);
         self::assertSame(200, $body['max_tokens']);
         self::assertSame(0.2, $body['temperature']);
-        self::assertSame('Bearer sk-testkey1234567890abcd', $request['args']['headers']['Authorization']);
+        self::assertSame('Bearer fake-key-1234567890abcd', $request['args']['headers']['Authorization']);
         self::assertSame('My site', $request['args']['headers']['X-Title']);
         self::assertSame(30, $request['args']['timeout']);
         self::assertNotEmpty($adapter->validateSettings(['extra_headers' => 'Authorization: x']));
