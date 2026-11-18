@@ -31,7 +31,7 @@ class State
 
     public static function lockDatabase(mixed $wpdb): ?\wpdb
     {
-        return $wpdb instanceof \wpdb && isset($wpdb->options) && is_string($wpdb->options) && $wpdb->options !== '' ? $wpdb : null;
+        return $wpdb instanceof \wpdb && $wpdb->options !== '' ? $wpdb : null;
     }
 
     /**
@@ -214,7 +214,11 @@ class State
             if ($held === null || $this->lockToken($held) !== $token) {
                 return false;
             }
-            return $this->swapLockRow($held, (string) wp_json_encode($value));
+            $new = (string) wp_json_encode($value);
+
+            // MySQL reports zero changed rows for an identical value, so a
+            // refresh within the same second is already done.
+            return $held === $new || $this->swapLockRow($held, $new);
         }
         $held = get_option(self::LOCK_OPTION);
         if (!is_array($held) || ($held['token'] ?? '') !== $token) {
@@ -235,7 +239,7 @@ class State
             return null;
         }
         $serialized = (string) wp_json_encode($value);
-        $inserted = $db->query($db->prepare(
+        $inserted = $db->query((string) $db->prepare(
             "INSERT IGNORE INTO %i (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
             $db->options,
             self::LOCK_OPTION,
@@ -243,7 +247,6 @@ class State
         ));
         wp_cache_delete(self::LOCK_OPTION, 'options');
         if ($inserted === 1) {
-
             return $value['token'];
         }
         $held = $this->readLockRow();
@@ -280,7 +283,7 @@ class State
         if ($db === null) {
             return false;
         }
-        $changed = $db->query($db->prepare(
+        $changed = $db->query((string) $db->prepare(
             'UPDATE %i SET option_value = %s WHERE option_name = %s AND option_value = %s',
             $db->options,
             $new,
@@ -322,7 +325,7 @@ class State
         if ($db !== null) {
             $held = $this->readLockRow();
             if ($held !== null && $this->lockToken($held) === $token) {
-                $db->query($db->prepare('DELETE FROM %i WHERE option_name = %s AND option_value = %s', $db->options, self::LOCK_OPTION, $held));
+                $db->query((string) $db->prepare('DELETE FROM %i WHERE option_name = %s AND option_value = %s', $db->options, self::LOCK_OPTION, $held));
                 wp_cache_delete(self::LOCK_OPTION, 'options');
             }
 

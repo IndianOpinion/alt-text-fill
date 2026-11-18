@@ -16,7 +16,8 @@ final class WpMediaLibrary implements MediaLibrary
     public function attachmentPage(int $afterId, int $limit): array
     {
         $ids = $this->wpdb->get_col($this->wpdb->prepare(
-            "SELECT ID FROM {$this->wpdb->posts} WHERE post_type = 'attachment' AND post_mime_type LIKE %s AND ID > %d ORDER BY ID ASC LIMIT %d",
+            "SELECT ID FROM %i WHERE post_type = 'attachment' AND post_mime_type LIKE %s AND ID > %d ORDER BY ID ASC LIMIT %d",
+            $this->wpdb->posts,
             'image/%',
             $afterId,
             $limit
@@ -35,9 +36,11 @@ final class WpMediaLibrary implements MediaLibrary
     public function thumbnailUsers(int $attachmentId): array
     {
         $ids = $this->wpdb->get_col($this->wpdb->prepare(
-            "SELECT pm.post_id FROM {$this->wpdb->postmeta} pm INNER JOIN {$this->wpdb->posts} p ON p.ID = pm.post_id
+            "SELECT pm.post_id FROM %i pm INNER JOIN %i p ON p.ID = pm.post_id
              WHERE pm.meta_key = '_thumbnail_id' AND pm.meta_value = %s AND p.post_type NOT IN ('revision', 'attachment')
              ORDER BY p.post_date DESC LIMIT 100",
+            $this->wpdb->postmeta,
+            $this->wpdb->posts,
             (string) $attachmentId
         ));
 
@@ -56,11 +59,11 @@ final class WpMediaLibrary implements MediaLibrary
             $likes[] = '%' . $this->wpdb->esc_like($url) . '%';
         }
         $or = implode(' OR ', array_fill(0, count($likes), 'post_content LIKE %s'));
-        $sql = "SELECT ID FROM {$this->wpdb->posts}
+        $sql = "SELECT ID FROM %i
                 WHERE post_type NOT IN ('revision', 'attachment', 'nav_menu_item') AND post_status NOT IN ('trash', 'auto-draft', 'inherit')
                 AND ({$or})
                 ORDER BY (post_status = 'publish' AND post_password = '') DESC, post_date DESC LIMIT %d";
-        $ids = $this->wpdb->get_col($this->wpdb->prepare($sql, ...array_merge($likes, [$limit])));
+        $ids = $this->wpdb->get_col($this->wpdb->prepare($sql, ...array_merge([$this->wpdb->posts], $likes, [$limit])));
 
         return array_values(array_map('intval', is_array($ids) ? $ids : []));
     }

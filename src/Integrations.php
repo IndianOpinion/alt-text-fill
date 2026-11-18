@@ -107,7 +107,7 @@ final class Integrations
         if (!function_exists('gen_queue_register_type')) {
             return;
         }
-        call_user_func('gen_queue_register_type', self::JOB_TYPE, [Plugin::class, 'queueJob'], [
+        gen_queue_register_type(self::JOB_TYPE, [Plugin::class, 'queueJob'], [
             'group' => self::CALLER,
             'max_attempts' => 5,
         ]);

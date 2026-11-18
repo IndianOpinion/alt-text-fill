@@ -72,7 +72,8 @@ class Status
         }
 
         return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value LIKE %s",
+            'SELECT COUNT(*) FROM %i WHERE meta_key = %s AND meta_value LIKE %s',
+            $wpdb->postmeta,
             AltField::STATE,
             '%' . $wpdb->esc_like('"' . $kind . '";s:') . '%' . $wpdb->esc_like(Scanner::SKIP_PARKED) . '%'
         ));
@@ -85,6 +86,6 @@ class Status
             return 0;
         }
 
-        return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value = '1'", AltField::DECORATIVE));
+        return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM %i WHERE meta_key = %s AND meta_value = '1'", $wpdb->postmeta, AltField::DECORATIVE));
     }
 }

@@ -133,6 +133,8 @@ class wpdb
     public string $prefix = 'wp_';
     public string $posts = 'wp_posts';
     public string $postmeta = 'wp_postmeta';
+    /** Empty: the stub has no options table, so the run lock uses the options API. */
+    public string $options = '';
     /** @var array<string, list<string>> Table name to columns, for SHOW COLUMNS. */
     public array $columns = [];
     /** @var list<string> */
@@ -173,7 +175,7 @@ class wpdb
 
     public function prepare(string $sql, mixed ...$args): string
     {
-        return vsprintf(str_replace(['%d', '%s', '%f'], ['%d', "'%s'", '%F'], $sql), $args);
+        return vsprintf(str_replace(['%d', '%s', '%f', '%i'], ['%d', "'%s'", '%F', '`%s`'], $sql), $args);
     }
 
     public function esc_like(string $text): string

@@ -47,7 +47,7 @@ final class WpdbRepository implements Repository
 
     public function getSuggestion(int $id): ?Suggestion
     {
-        $row = $this->wpdb->get_row($this->wpdb->prepare('SELECT * FROM ' . $this->t('suggestions') . ' WHERE id = %d', $id), ARRAY_A);
+        $row = $this->wpdb->get_row($this->wpdb->prepare('SELECT * FROM %i WHERE id = %d', $this->t('suggestions'), $id), ARRAY_A);
 
         return is_array($row) ? Suggestion::fromRow($row) : null;
     }
@@ -57,13 +57,14 @@ final class WpdbRepository implements Repository
         [$where, $args] = $this->suggestionWhere($filter);
         $column = $orderBy === 'confidence' ? 'confidence' : 'created';
         $dir = strtoupper($order) === 'ASC' ? 'ASC' : 'DESC';
-        $sql = 'SELECT * FROM ' . $this->t('suggestions') . ' WHERE ' . $where . " ORDER BY {$column} {$dir}, id {$dir}";
+        $args = array_merge([$this->t('suggestions')], $args);
+        $sql = 'SELECT * FROM %i WHERE ' . $where . ' ORDER BY ' . $column . ' ' . $dir . ', id ' . $dir;
         if ($limit > 0) {
             $sql .= ' LIMIT %d OFFSET %d';
             $args[] = $limit;
             $args[] = max(0, $offset);
         }
-        $rows = $this->wpdb->get_results($args === [] ? $sql : $this->wpdb->prepare($sql, ...$args), ARRAY_A);
+        $rows = $this->wpdb->get_results((string) $this->wpdb->prepare($sql, ...$args), ARRAY_A);
 
         return array_map(static fn (array $r): Suggestion => Suggestion::fromRow($r), is_array($rows) ? $rows : []);
     }
@@ -71,9 +72,9 @@ final class WpdbRepository implements Repository
     public function countSuggestions(array $filter = []): int
     {
         [$where, $args] = $this->suggestionWhere($filter);
-        $sql = 'SELECT COUNT(*) FROM ' . $this->t('suggestions') . ' WHERE ' . $where;
+        $sql = 'SELECT COUNT(*) FROM %i WHERE ' . $where;
 
-        return (int) $this->wpdb->get_var($args === [] ? $sql : $this->wpdb->prepare($sql, ...$args));
+        return (int) $this->wpdb->get_var((string) $this->wpdb->prepare($sql, $this->t('suggestions'), ...$args));
     }
 
     public function deletePendingForAttachment(int $attachmentId): int
@@ -98,7 +99,7 @@ final class WpdbRepository implements Repository
 
     public function getEntry(int $id): ?Entry
     {
-        $row = $this->wpdb->get_row($this->wpdb->prepare('SELECT * FROM ' . $this->t('entries') . ' WHERE id = %d', $id), ARRAY_A);
+        $row = $this->wpdb->get_row($this->wpdb->prepare('SELECT * FROM %i WHERE id = %d', $this->t('entries'), $id), ARRAY_A);
 
         return is_array($row) ? Entry::fromRow($row) : null;
     }
@@ -117,13 +118,14 @@ final class WpdbRepository implements Repository
             $where[] = 'created >= %d';
             $args[] = (int) $filter['since'];
         }
-        $sql = 'SELECT * FROM ' . $this->t('entries') . ' WHERE ' . implode(' AND ', $where) . ' ORDER BY created DESC, id DESC';
+        $args = array_merge([$this->t('entries')], $args);
+        $sql = 'SELECT * FROM %i WHERE ' . implode(' AND ', $where) . ' ORDER BY created DESC, id DESC';
         if ($limit > 0) {
             $sql .= ' LIMIT %d OFFSET %d';
             $args[] = $limit;
             $args[] = max(0, $offset);
         }
-        $rows = $this->wpdb->get_results($args === [] ? $sql : $this->wpdb->prepare($sql, ...$args), ARRAY_A);
+        $rows = $this->wpdb->get_results((string) $this->wpdb->prepare($sql, ...$args), ARRAY_A);
 
         return array_map(static fn (array $r): Entry => Entry::fromRow($r), is_array($rows) ? $rows : []);
     }
@@ -155,14 +157,14 @@ final class WpdbRepository implements Repository
 
     public function getRun(string $id): ?RunReport
     {
-        $row = $this->wpdb->get_row($this->wpdb->prepare('SELECT * FROM ' . $this->t('runs') . ' WHERE id = %s', $id), ARRAY_A);
+        $row = $this->wpdb->get_row($this->wpdb->prepare('SELECT * FROM %i WHERE id = %s', $this->t('runs'), $id), ARRAY_A);
 
         return is_array($row) ? RunReport::fromRow($row) : null;
     }
 
     public function recentRuns(int $limit = 20): array
     {
-        $rows = $this->wpdb->get_results($this->wpdb->prepare('SELECT * FROM ' . $this->t('runs') . ' ORDER BY started DESC LIMIT %d', $limit), ARRAY_A);
+        $rows = $this->wpdb->get_results($this->wpdb->prepare('SELECT * FROM %i ORDER BY started DESC LIMIT %d', $this->t('runs'), $limit), ARRAY_A);
 
         return array_map(static fn (array $r): RunReport => RunReport::fromRow($r), is_array($rows) ? $rows : []);
     }
@@ -172,8 +174,9 @@ final class WpdbRepository implements Repository
         $s = $this->t('suggestions');
         $out = ['expired' => 0, 'suggestions' => 0, 'runs' => 0, 'entries' => 0];
         if ($pendingBefore > 0) {
-            $out['expired'] = (int) $this->wpdb->query($this->wpdb->prepare(
-                "UPDATE {$s} SET status = %s, decided = %d WHERE status = %s AND created < %d",
+            $out['expired'] = (int) $this->wpdb->query((string) $this->wpdb->prepare(
+                'UPDATE %i SET status = %s, decided = %d WHERE status = %s AND created < %d',
+                $s,
                 Suggestion::EXPIRED,
                 $pendingBefore,
                 Suggestion::PENDING,
@@ -181,17 +184,18 @@ final class WpdbRepository implements Repository
             ));
         }
         if ($decidedBefore > 0) {
-            $out['suggestions'] = (int) $this->wpdb->query($this->wpdb->prepare(
-                "DELETE FROM {$s} WHERE status <> %s AND GREATEST(decided, created) < %d",
+            $out['suggestions'] = (int) $this->wpdb->query((string) $this->wpdb->prepare(
+                'DELETE FROM %i WHERE status <> %s AND GREATEST(decided, created) < %d',
+                $s,
                 Suggestion::PENDING,
                 $decidedBefore
             ));
         }
         if ($runsBefore > 0) {
-            $out['runs'] = (int) $this->wpdb->query($this->wpdb->prepare('DELETE FROM ' . $this->t('runs') . ' WHERE started < %d', $runsBefore));
+            $out['runs'] = (int) $this->wpdb->query((string) $this->wpdb->prepare('DELETE FROM %i WHERE started < %d', $this->t('runs'), $runsBefore));
         }
         if ($entriesBefore > 0) {
-            $out['entries'] = (int) $this->wpdb->query($this->wpdb->prepare('DELETE FROM ' . $this->t('entries') . ' WHERE created < %d', $entriesBefore));
+            $out['entries'] = (int) $this->wpdb->query((string) $this->wpdb->prepare('DELETE FROM %i WHERE created < %d', $this->t('entries'), $entriesBefore));
         }
 
         return $out;
@@ -200,8 +204,8 @@ final class WpdbRepository implements Repository
     public function decisionStats(int $since): array
     {
         $rows = $this->wpdb->get_results($this->wpdb->prepare(
-            'SELECT adapter, model, status, COUNT(*) AS n FROM ' . $this->t('suggestions')
-            . ' WHERE status IN (%s, %s, %s) AND decided >= %d GROUP BY adapter, model, status',
+            'SELECT adapter, model, status, COUNT(*) AS n FROM %i WHERE status IN (%s, %s, %s) AND decided >= %d GROUP BY adapter, model, status',
+            $this->t('suggestions'),
             Suggestion::APPROVED,
             Suggestion::EDITED,
             Suggestion::REJECTED,
@@ -217,7 +221,7 @@ final class WpdbRepository implements Repository
 
     /**
      * @param array<string, mixed> $f
-     * @return array{0: string, 1: list<mixed>}
+     * @return array{0: literal-string, 1: list<mixed>}
      */
     private function suggestionWhere(array $f): array
     {

@@ -127,6 +127,34 @@ final class WpdbRepositoryTest extends TestCase
         self::assertSame([10, 11], $lib->contentUsers(1, [], 20));
     }
 
+    public function testRunLockIsExclusiveAcrossConnectionsAndAStaleLockIsBrokenOnce(): void
+    {
+        $this->db->query('DROP TABLE IF EXISTS wptest_options');
+        $this->db->query("CREATE TABLE wptest_options (option_id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY, option_name varchar(191) NOT NULL DEFAULT '', option_value longtext NOT NULL, autoload varchar(20) NOT NULL DEFAULT 'yes', UNIQUE KEY option_name (option_name))");
+        $clock = new \IndianOpinion\AltTextFill\Tests\Support\FrozenClock();
+        $a = new \IndianOpinion\AltTextFill\State($clock, \IndianOpinion\AltTextFill\State::lockDatabase($this->db));
+        $b = new \IndianOpinion\AltTextFill\State($clock, \IndianOpinion\AltTextFill\State::lockDatabase(new MysqlWpdb()));
+
+        $tokenA = $a->acquireLock(600);
+        self::assertNotNull($tokenA);
+        self::assertNull($b->acquireLock(600), 'a second connection must not take a held lock');
+        self::assertTrue($a->refreshLock((string) $tokenA, 600));
+
+        // Both see the same expired lock; only one may break it.
+        $clock->advance(601);
+        $broke1 = $broke2 = false;
+        $tokenB = $b->acquireLock(600, $broke1);
+        self::assertNotNull($tokenB);
+        self::assertTrue($broke1);
+        self::assertNull($a->acquireLock(600, $broke2));
+        self::assertFalse($a->refreshLock((string) $tokenA, 600), 'the old holder has lost the lock');
+
+        $a->releaseLock((string) $tokenA);
+        self::assertNull($a->acquireLock(600), 'releasing someone else\'s token changes nothing');
+        $b->releaseLock((string) $tokenB);
+        self::assertNotNull($a->acquireLock(600));
+    }
+
     public function testInsertFailureThrows(): void
     {
         $this->db->query('DROP TABLE wptest_alt_text_fill_entries');

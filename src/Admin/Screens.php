@@ -323,7 +323,7 @@ final class Screens
                 $input[$key] = sanitize_text_field((string) $raw[$key]);
             }
         }
-        $adapter = (string) ($input['adapter'] ?? '');
+        $adapter = is_string($input['adapter'] ?? null) ? $input['adapter'] : '';
         if ($adapter !== '' && is_array($raw['adapter_settings'][$adapter] ?? null)) {
             $fields = [];
             $existing = Plugin::container()->settings->get('adapter_settings');

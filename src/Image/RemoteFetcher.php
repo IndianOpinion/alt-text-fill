@@ -67,7 +67,8 @@ class RemoteFetcher
             }
             $status = (int) wp_remote_retrieve_response_code($response);
             if ($status >= 300 && $status < 400) {
-                $location = (string) wp_remote_retrieve_header($response, 'location');
+                $location = wp_remote_retrieve_header($response, 'location');
+                $location = is_array($location) ? (string) reset($location) : $location;
                 if ($location === '') {
                     return ['ok' => false, 'bytes' => '', 'reason' => 'file missing'];
                 }

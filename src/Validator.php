@@ -219,8 +219,7 @@ class Validator
         $slice = mb_substr($text, 0, $max);
         if (preg_match_all('/[.!?](?=\s|$)/u', $slice, $m, PREG_OFFSET_CAPTURE) > 0) {
             $last = end($m[0]);
-            $byteEnd = $last[1] + 1;
-            $sentence = trim(substr($slice, 0, $byteEnd));
+            $sentence = $last === false ? '' : trim(substr($slice, 0, $last[1] + 1));
             if (mb_strlen($sentence) >= $min) {
                 return $sentence;
             }

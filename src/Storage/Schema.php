@@ -146,7 +146,7 @@ class Schema
         $missing = [];
         foreach (self::expectedColumns() as $suffix => $columns) {
             $table = self::table($wpdb, $suffix);
-            $found = $wpdb->get_col('SHOW COLUMNS FROM `' . esc_sql($table) . '`', 0);
+            $found = $wpdb->get_col((string) $wpdb->prepare('SHOW COLUMNS FROM %i', $table), 0);
             $found = is_array($found) ? array_map('strtolower', array_map('strval', $found)) : [];
             $absent = array_values(array_diff($columns, $found));
             if ($absent !== []) {
@@ -181,7 +181,7 @@ class Schema
     public static function drop(\wpdb $wpdb): void
     {
         foreach (array_keys(self::expectedColumns()) as $suffix) {
-            $wpdb->query('DROP TABLE IF EXISTS `' . esc_sql(self::table($wpdb, $suffix)) . '`');
+            $wpdb->query((string) $wpdb->prepare('DROP TABLE IF EXISTS %i', self::table($wpdb, $suffix)));
         }
     }
 }

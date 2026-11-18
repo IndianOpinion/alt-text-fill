@@ -18,6 +18,7 @@ final class MysqlWpdb extends \wpdb
         $this->prefix = $prefix;
         $this->posts = $prefix . 'posts';
         $this->postmeta = $prefix . 'postmeta';
+        $this->options = $prefix . 'options';
         mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
         $this->db = new \mysqli(
             (string) (getenv('ALT_TEXT_FILL_TEST_DB_HOST') ?: 'localhost'),
@@ -44,12 +45,13 @@ final class MysqlWpdb extends \wpdb
     {
         $i = 0;
 
-        return (string) preg_replace_callback('/%[dsf]/', function (array $m) use (&$i, $args): string {
+        return (string) preg_replace_callback('/%[dsfi]/', function (array $m) use (&$i, $args): string {
             $value = $args[$i++] ?? null;
 
             return match ($m[0]) {
                 '%d' => (string) (int) $value,
                 '%f' => sprintf('%F', (float) $value),
+                '%i' => '`' . str_replace('`', '``', (string) $value) . '`',
                 default => "'" . $this->db->real_escape_string((string) $value) . "'",
             };
         }, $sql);
