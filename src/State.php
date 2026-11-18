@@ -10,8 +10,8 @@ namespace IndianOpinion\AltTextFill;
  *
  * The state lives in one option with autoload off. The kill switch has its
  * own small autoloaded option because admin notices read it on every admin
- * page. The lock is a separate option taken with add_option(), which is an
- * atomic insert, so two runs can never both hold it.
+ * page. The lock is a separate option row taken and broken atomically in
+ * SQL (see acquireLock()), so two runs can never both hold it.
  */
 class State
 {
@@ -20,8 +20,18 @@ class State
     public const LOCK_OPTION = 'alt_text_fill_lock';
     public const BREAKER_LIMIT = 5;
 
-    public function __construct(private Clock $clock)
+    /**
+     * @param \wpdb|null $db A real wpdb (one with an options table name) makes
+     *                       the run lock atomic in SQL. Without one (the test
+     *                       stub layer) the options API is used.
+     */
+    public function __construct(private Clock $clock, private ?\wpdb $db = null)
     {
+    }
+
+    public static function lockDatabase(mixed $wpdb): ?\wpdb
+    {
+        return $wpdb instanceof \wpdb && isset($wpdb->options) && is_string($wpdb->options) && $wpdb->options !== '' ? $wpdb : null;
     }
 
     /**
@@ -163,12 +173,21 @@ class State
      * Takes the run lock. Returns the token, or null when another run holds
      * a lock that has not expired. A stale lock is broken and reported
      * through $brokeStale.
+     *
+     * With a database the lock is one row in the options table, taken with
+     * INSERT IGNORE and broken with a compare-and-swap UPDATE on the exact
+     * stale value, so two processes can never both hold it, even when both
+     * see the same stale lock. add_option() is not used: it upserts, so two
+     * racing callers could both be told they won.
      */
     public function acquireLock(int $ttl, bool &$brokeStale = false): ?string
     {
         $brokeStale = false;
         $token = bin2hex(random_bytes(8));
         $value = ['token' => $token, 'expires' => $this->clock->now() + $ttl];
+        if ($this->db !== null) {
+            return $this->acquireWithDb($value, $brokeStale);
+        }
         if ($this->tryAdd($value)) {
             return $token;
         }
@@ -184,6 +203,111 @@ class State
     }
 
     /**
+     * Pushes the expiry of a lock this process holds, so a long run is not
+     * taken for a stale one. Returns false when the lock is no longer ours.
+     */
+    public function refreshLock(string $token, int $ttl): bool
+    {
+        $value = ['token' => $token, 'expires' => $this->clock->now() + $ttl];
+        if ($this->db !== null) {
+            $held = $this->readLockRow();
+            if ($held === null || $this->lockToken($held) !== $token) {
+                return false;
+            }
+            return $this->swapLockRow($held, (string) wp_json_encode($value));
+        }
+        $held = get_option(self::LOCK_OPTION);
+        if (!is_array($held) || ($held['token'] ?? '') !== $token) {
+            return false;
+        }
+        update_option(self::LOCK_OPTION, $value, false);
+
+        return true;
+    }
+
+    /**
+     * @param array{token: string, expires: int} $value
+     */
+    private function acquireWithDb(array $value, bool &$brokeStale): ?string
+    {
+        $db = $this->db;
+        if ($db === null) {
+            return null;
+        }
+        $serialized = (string) wp_json_encode($value);
+        $inserted = $db->query($db->prepare(
+            "INSERT IGNORE INTO %i (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+            $db->options,
+            self::LOCK_OPTION,
+            $serialized
+        ));
+        wp_cache_delete(self::LOCK_OPTION, 'options');
+        if ($inserted === 1) {
+
+            return $value['token'];
+        }
+        $held = $this->readLockRow();
+        if ($held === null) {
+            return null;
+        }
+        $expires = (int) ($this->decodeLock($held)['expires'] ?? 0);
+        if ($expires > $this->clock->now()) {
+            return null;
+        }
+        if (!$this->swapLockRow($held, $serialized)) {
+            return null;
+        }
+        $brokeStale = true;
+
+        return $value['token'];
+    }
+
+    private function readLockRow(): ?string
+    {
+        $db = $this->db;
+        if ($db === null) {
+            return null;
+        }
+        $held = $db->get_var($db->prepare('SELECT option_value FROM %i WHERE option_name = %s', $db->options, self::LOCK_OPTION));
+
+        return is_string($held) ? $held : null;
+    }
+
+    /** Compare-and-swap on the exact stored value: true only for the one caller that changed it. */
+    private function swapLockRow(string $old, string $new): bool
+    {
+        $db = $this->db;
+        if ($db === null) {
+            return false;
+        }
+        $changed = $db->query($db->prepare(
+            'UPDATE %i SET option_value = %s WHERE option_name = %s AND option_value = %s',
+            $db->options,
+            $new,
+            self::LOCK_OPTION,
+            $old
+        ));
+        wp_cache_delete(self::LOCK_OPTION, 'options');
+
+        return $changed === 1;
+    }
+
+    private function lockToken(string $serialized): string
+    {
+        return (string) ($this->decodeLock($serialized)['token'] ?? '');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function decodeLock(string $stored): array
+    {
+        $data = json_decode($stored, true);
+
+        return is_array($data) ? $data : [];
+    }
+
+    /**
      * @phpstan-impure
      * @param array{token: string, expires: int} $value
      */
@@ -194,6 +318,16 @@ class State
 
     public function releaseLock(string $token): void
     {
+        $db = $this->db;
+        if ($db !== null) {
+            $held = $this->readLockRow();
+            if ($held !== null && $this->lockToken($held) === $token) {
+                $db->query($db->prepare('DELETE FROM %i WHERE option_name = %s AND option_value = %s', $db->options, self::LOCK_OPTION, $held));
+                wp_cache_delete(self::LOCK_OPTION, 'options');
+            }
+
+            return;
+        }
         $held = get_option(self::LOCK_OPTION);
         if (is_array($held) && ($held['token'] ?? '') === $token) {
             delete_option(self::LOCK_OPTION);

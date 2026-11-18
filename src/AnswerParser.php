@@ -36,6 +36,18 @@ final class AnswerParser
         );
     }
 
+    /** True when parse() would accept the text (used to label a billed call). */
+    public static function looksValid(string $raw): bool
+    {
+        try {
+            self::parse($raw);
+        } catch (MalformedAnswerException $e) {
+            return false;
+        }
+
+        return true;
+    }
+
     /**
      * @return array<string, mixed>|null
      */

@@ -42,6 +42,7 @@ final class Plugin
         add_action(self::CRON_HOOK, [self::class, 'cronRun']);
         add_action(self::MAINTENANCE_HOOK, [self::class, 'maintenance']);
         add_action('init', [self::class, 'init']);
+        add_action(Integrations::QUEUE_REGISTER, [Integrations::class, 'registerJobType']);
         add_action('delete_attachment', [self::class, 'onDeleteAttachment']);
         add_filter('wp_update_attachment_metadata', [self::class, 'onMetadataUpdate'], 99, 2);
         add_action('attachment_updated', [self::class, 'onAttachmentUpdated']);
@@ -72,7 +73,6 @@ final class Plugin
 
     public static function init(): void
     {
-        add_action(Integrations::hook('queue_handle'), [self::class, 'queueJob'], 10, 1);
         self::syncSchedule();
     }
 
@@ -155,13 +155,39 @@ final class Plugin
     }
 
     /**
-     * @param mixed $payload
+     * gen-queue handler for one image (case 65). It receives gen-queue's job
+     * and context objects; nothing here depends on gen-queue's classes being
+     * loaded except the exceptions thrown to ask for a retry.
+     *
+     * @return array<string, string>
      */
-    public static function queueJob($payload): void
+    public static function queueJob(mixed $job, mixed $ctx = null): array
     {
-        if (is_array($payload)) {
-            self::container()->runner->handleJob($payload);
+        $payload = [];
+        if (is_object($job) && isset($job->payload) && is_array($job->payload)) {
+            $payload = $job->payload;
+        } elseif (is_array($job)) {
+            $payload = $job;
         }
+        $c = self::container();
+        $outcome = $c->runner->handleJob($payload);
+        $cost = $c->runner->lastCost();
+        if ($cost !== null && $cost > 0 && is_object($ctx) && method_exists($ctx, 'addCost')) {
+            $ctx->addCost(round($cost, 9), ['metered' => $c->runner->lastMetered()]);
+        }
+        if (str_starts_with($outcome, 'halt:') || str_starts_with($outcome, 'stop:') || $outcome === 'failures') {
+            $reason = (string) preg_replace('/^(halt|stop):/', '', $outcome);
+            if ($reason === Runner::STOP_ACCOUNT && class_exists('IndianOpinion\\GenQueue\\AccountException')) {
+                throw new \IndianOpinion\GenQueue\AccountException('alt-text-fill paused: provider account.');
+            }
+            $wait = $reason === Runner::STOP_LOCKED ? 60 : ($reason === Runner::STOP_RATE ? max(60, $c->state->waitingUntil() - $c->clock->now()) : 900);
+            if (class_exists('IndianOpinion\\GenQueue\\RetryableException')) {
+                throw new \IndianOpinion\GenQueue\RetryableException('alt-text-fill: ' . $reason, $wait);
+            }
+            throw new \RuntimeException('alt-text-fill: ' . $reason);
+        }
+
+        return ['outcome' => $outcome];
     }
 
     /**

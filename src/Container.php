@@ -52,7 +52,7 @@ class Container
         global $wpdb;
         $this->settings = $settings ?? new Settings();
         $this->clock = $clock ?? new SystemClock();
-        $this->state = new State($this->clock);
+        $this->state = new State($this->clock, State::lockDatabase($wpdb));
         $this->repository = $repository ?? new WpdbRepository($wpdb);
         $this->library = $library ?? new WpMediaLibrary($wpdb);
         $this->logger = $logger ?? new Logger();
@@ -63,7 +63,7 @@ class Container
         $this->finder = new UsageFinder($this->library, $this->settings);
         $this->contexts = new ContextBuilder($this->settings);
         $this->preparer = new ImagePreparer($this->settings, new RemoteFetcher($this->settings->stringList('remote_hosts')), $this->logger);
-        $this->prompts = new PromptBuilder($this->settings);
+        $this->prompts = new PromptBuilder($this->settings, $this->logger);
         $this->validator = new Validator($this->settings);
         $this->scanner = new Scanner($this->library, $this->finder, $this->emptyAlt, $this->field, $this->settings, $this->state, $this->repository, $this->adapters);
         $this->writer = new Writer($this->field, $this->repository, $this->clock);

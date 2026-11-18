@@ -225,37 +225,104 @@ final class RunTest extends TestCase
         self::assertSame([], $this->fake->calls);
     }
 
+    /**
+     * A spend-meter stand-in that speaks contract 1: decision arrays in,
+     * call arrays recorded.
+     *
+     * @param list<array<string, mixed>> $intents
+     * @param list<array<string, mixed>> $recorded
+     */
+    private function meter(int $allow, array &$intents, array &$recorded): void
+    {
+        add_filter('spend_meter_pre_spend', static function ($decision, array $intent) use ($allow, &$intents) {
+            $intents[] = $intent;
+            $ok = count($intents) <= $allow;
+
+            return ['allowed' => $ok, 'reason' => $ok ? 'ok' : 'cap_site_day', 'message' => '', 'reservation_id' => $ok ? 'res-' . count($intents) : null, 'estimate' => 0, 'remaining' => null, 'api' => 1];
+        }, 10, 2);
+        add_action('spend_meter_record', static function (array $call) use (&$recorded): void {
+            $recorded[] = $call;
+        });
+    }
+
     public function testT62SpendMeterDenyStopsTheRunAndRecordFiresAfterACall(): void
     {
         $this->images(3);
-        $checks = 0;
-        add_filter('spend_meter_pre_spend', static function ($allow, string $purpose) use (&$checks) {
-            self::assertSame('alt_text_fill.describe', $purpose);
-
-            return ++$checks <= 2;
-        }, 10, 2);
-        $recorded = [];
-        add_action('spend_meter_record', static function (string $purpose, array $usage) use (&$recorded): void {
-            $recorded[] = $usage;
-        }, 10, 2);
+        $intents = $recorded = [];
+        $this->meter(2, $intents, $recorded);
 
         $report = $this->runReal();
 
         self::assertSame(Runner::STOP_SPEND, $report->stopReason);
         self::assertCount(2, $this->fake->calls);
+        self::assertCount(3, $intents);
+        self::assertSame('alt_text_fill.describe', $intents[0]['purpose']);
+        self::assertSame('alt-text-fill', $intents[0]['caller']);
+        self::assertSame('fake', $intents[0]['provider']);
+        self::assertGreaterThan(0, $intents[0]['est_input_tokens']);
+        self::assertSame(200, $intents[0]['max_output_tokens']);
         self::assertCount(2, $recorded);
+        self::assertSame('res-1', $recorded[0]['reservation_id']);
+        self::assertSame('ok', $recorded[0]['status']);
         self::assertSame(100, $recorded[0]['input_tokens']);
         self::assertSame('fake-model', $recorded[0]['model']);
+        self::assertSame(1, $recorded[0]['attempt']);
+    }
+
+    public function testT62NullDecisionMeansNoMeterAndOwnCapsApply(): void
+    {
+        $this->images(3);
+        add_filter('spend_meter_pre_spend', static fn ($d) => $d, 10, 2);
+        $this->settings(['daily_cap' => 1]);
+
+        self::assertSame(Runner::STOP_DAILY, $this->runReal()->stopReason);
+        self::assertCount(1, $this->fake->calls);
     }
 
     public function testT62OwnCapsStillApplyWhenSpendMeterAllows(): void
     {
         $this->images(3);
-        add_filter('spend_meter_pre_spend', static fn (): bool => true);
+        $intents = $recorded = [];
+        $this->meter(99, $intents, $recorded);
         $this->settings(['daily_cap' => 1]);
 
         self::assertSame(Runner::STOP_DAILY, $this->runReal()->stopReason);
         self::assertCount(1, $this->fake->calls);
+    }
+
+    public function testT62MalformedDecisionDeniesTheCall(): void
+    {
+        $this->images(1);
+        add_filter('spend_meter_pre_spend', static fn (): bool => true);
+
+        self::assertSame(Runner::STOP_SPEND, $this->runReal()->stopReason);
+        self::assertSame([], $this->fake->calls);
+    }
+
+    public function testT62EveryAttemptIsRecordedWithTheSameReservation(): void
+    {
+        $this->images(1);
+        $intents = $recorded = [];
+        $this->meter(99, $intents, $recorded);
+        $this->fake->push(new \IndianOpinion\AltTextFill\Exception\AdapterException('timeout', true), $this->answer('A red kite over a field'));
+
+        self::assertSame(1, $this->runReal()->count('suggestions'));
+        self::assertCount(1, $intents, 'a retry is not a new check');
+        self::assertCount(2, $recorded);
+        self::assertSame(['error_unbilled', 'ok'], array_column($recorded, 'status'));
+        self::assertSame([1, 2], array_column($recorded, 'attempt'));
+        self::assertSame(['res-1', 'res-1'], array_column($recorded, 'reservation_id'));
+    }
+
+    public function testT62BrokenAnswerIsRecordedAsBilledError(): void
+    {
+        $this->images(1);
+        $intents = $recorded = [];
+        $this->meter(99, $intents, $recorded);
+        $this->fake->push('no json here');
+
+        $this->runReal();
+        self::assertSame('error_billed', $recorded[0]['status']);
     }
 
     public function testT63GenQueueGetsOneJobPerImageWithTheIdempotencyKeyAndCapsStillApply(): void
@@ -263,8 +330,8 @@ final class RunTest extends TestCase
         $this->images(3);
         $this->settings(['use_gen_queue' => true, 'daily_cap' => 2]);
         $jobs = [];
-        add_filter('gen_queue_enqueue', static function ($id, string $type, array $payload, array $args) use (&$jobs) {
-            $jobs[] = ['type' => $type, 'payload' => $payload, 'key' => $args['idempotency_key']];
+        add_filter('gen_queue_enqueue_job', static function ($id, string $type, array $payload, array $args) use (&$jobs) {
+            $jobs[] = ['type' => $type, 'payload' => $payload, 'args' => $args];
 
             return count($jobs);
         }, 10, 4);
@@ -274,17 +341,53 @@ final class RunTest extends TestCase
         self::assertSame(3, $report->count('enqueued'));
         self::assertSame([], $this->fake->calls);
         self::assertSame('alt_text_fill.describe', $jobs[0]['type']);
-        self::assertMatchesRegularExpression('/^alt-text-fill:1:f:[0-9a-f]{40}$/', $jobs[0]['key']);
+        self::assertMatchesRegularExpression('/^alt-text-fill:1:f:[0-9a-f]{40}:0$/', $jobs[0]['args']['idempotency_key']);
+        self::assertSame('requeue', $jobs[0]['args']['on_conflict']);
 
         $outcomes = array_map(fn (array $j): string => $this->c->runner->handleJob($j['payload']), $jobs);
         self::assertSame(['suggestions', 'suggestions', 'halt:daily cap'], $outcomes);
         self::assertCount(2, $this->fake->calls);
     }
 
+    public function testT63QueueHandlerAsksForARetryWhenACapHalts(): void
+    {
+        $this->images(1);
+        $this->settings(['daily_cap' => 0]);
+        $job = new class () {
+            /** @var array<string, mixed> */
+            public array $payload = ['attachment_id' => 1, 'run_id' => 'q'];
+        };
+
+        try {
+            \IndianOpinion\AltTextFill\Plugin::queueJob($job);
+            self::fail('A halted job must not be reported as done.');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('daily cap', $e->getMessage());
+        }
+        self::assertSame([], $this->fake->calls);
+    }
+
+    public function testT63QueueJobWaitsWhileARunHoldsTheLock(): void
+    {
+        $this->images(1);
+        add_option(State::LOCK_OPTION, ['token' => 'other', 'expires' => $this->clock->now + 300]);
+
+        self::assertSame('halt:locked', $this->c->runner->handleJob(['attachment_id' => 1]));
+        self::assertSame([], $this->fake->calls);
+    }
+
     public function testT63WithoutOptInTheOwnRunnerIsUsed(): void
     {
         $this->images(1);
-        add_filter('gen_queue_enqueue', static fn () => 1);
+        add_filter('gen_queue_enqueue_job', static fn () => 1);
+
+        self::assertSame(1, $this->runReal()->count('suggestions'));
+    }
+
+    public function testT63AbsentQueueFallsBackToTheOwnRunner(): void
+    {
+        $this->images(1);
+        $this->settings(['use_gen_queue' => true]);
 
         self::assertSame(1, $this->runReal()->count('suggestions'));
     }

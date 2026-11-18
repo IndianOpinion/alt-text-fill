@@ -16,7 +16,7 @@ class PromptBuilder
     public const OPEN = '<<<CONTEXT';
     public const CLOSE = 'CONTEXT>>>';
 
-    public function __construct(private Settings $settings)
+    public function __construct(private Settings $settings, private ?Logger $logger = null)
     {
     }
 
@@ -48,13 +48,20 @@ class PromptBuilder
         $source = 'built-in';
         $slug = $this->settings->string('prompt_slug');
         if ($slug !== '') {
-            $fromLibrary = apply_filters(Integrations::hook('prompt_render'), null, $slug, [
+            // The template replaces the system part only. The user part,
+            // with the delimited context block, stays this plugin's own so
+            // case 20 holds whatever the template says.
+            $error = null;
+            $rendered = Integrations::renderPrompt($slug, [
                 'max_length' => $this->settings->int('max_length'),
                 'language' => $context->language,
-            ]);
-            if (is_string($fromLibrary) && trim($fromLibrary) !== '') {
-                $system = $fromLibrary;
+            ], $error);
+            $text = $rendered === null ? '' : (trim($rendered['system']) !== '' ? $rendered['system'] : $rendered['user']);
+            if (trim($text) !== '') {
+                $system = $text;
                 $source = 'prompt-library:' . $slug;
+            } elseif ($error !== null) {
+                $this->logger?->warning('Prompt template "' . $slug . '" could not be rendered; the built-in prompt was used. ' . $error);
             }
         }
         $contextText = str_replace([self::OPEN, self::CLOSE], '', $context->text);

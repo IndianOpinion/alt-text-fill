@@ -43,9 +43,14 @@ class Runner
     public const STOP_SPEND = 'spend meter';
     public const STOP_DRY_ONLY = 'dry run only';
     public const STOP_SETTINGS = 'settings unreadable';
+    public const STOP_LOCK_LOST = 'lock lost';
+    public const STOP_LOCKED = 'locked';
 
     /** Skip reasons found while preparing that hold until the next full scan. */
     private const HOLD_UNTIL_NEXT_SCAN = [ImagePreparer::SKIP_MISSING, ImagePreparer::SKIP_ANIMATED, ImagePreparer::SKIP_TOO_LARGE, Scanner::SKIP_UNSUPPORTED];
+
+    private ?float $lastCost = null;
+    private bool $lastMetered = false;
 
     public function __construct(
         private Settings $settings,
@@ -107,48 +112,55 @@ class Runner
         do_action('alt_text_fill_run_started', $runId, $args);
 
         try {
-            $found = $this->scanner->collect($limit, $includeRejected, $ids);
+            $found = $this->scanner->collect($limit, $includeRejected, $ids, 20, !$dry);
             $counts['considered'] = $found['considered'];
             foreach ($found['skipped'] as $reason => $n) {
                 $skipped[$reason] = ($skipped[$reason] ?? 0) + $n;
             }
-            $useQueue = !$dry && $this->settings->bool('use_gen_queue') && Integrations::genQueuePresent();
+            $useQueue = !$dry && $this->settings->bool('use_gen_queue');
             $caps = $adapter !== null ? $adapter->capabilities() : ['mime_types' => Scanner::DEFAULT_MIMES, 'accepts_url' => false, 'accepts_animation' => false, 'max_bytes' => 0];
             $processed = 0;
+            // Index of the first candidate not yet handled; on an early stop
+            // the scan cursor is moved back to it so nothing is passed over.
+            $next = 0;
             foreach ($found['candidates'] as $candidate) {
                 if ($dry) {
                     $items[] = $this->dryItem($candidate, $caps);
+                    $next++;
                     continue;
                 }
                 $halt = $this->haltReason($startMicro, $budget, $processed);
+                if ($halt === null && !$this->state->refreshLock($token, self::LOCK_TTL)) {
+                    $halt = self::STOP_LOCK_LOST;
+                }
                 if ($halt !== null) {
                     $stop = $halt;
                     break;
                 }
                 $processed++;
-                if ($useQueue) {
-                    $key = 'alt-text-fill:' . $candidate->attachmentId . ':' . Fingerprint::of($candidate->attachmentId);
-                    $job = apply_filters(Integrations::hook('queue_enqueue'), null, Integrations::JOB_TYPE, ['attachment_id' => $candidate->attachmentId, 'run_id' => $runId], ['idempotency_key' => $key]);
-                    if ($job !== null && $job !== false && !is_wp_error($job)) {
-                        $counts['enqueued']++;
-                        continue;
-                    }
-                }
-                $outcome = $this->processOne($candidate, (string) $adapter?->id(), $runId);
-                if (str_starts_with($outcome, 'skip:')) {
-                    $reason = substr($outcome, 5);
-                    $skipped[$reason] = ($skipped[$reason] ?? 0) + 1;
+                if ($useQueue && $this->enqueue($candidate, $runId)) {
+                    $counts['enqueued']++;
+                    $next++;
                     continue;
                 }
+                $outcome = $this->processOne($candidate, (string) $adapter?->id(), $runId);
+                if (str_starts_with($outcome, 'halt:')) {
+                    $stop = substr($outcome, 5);
+                    break;
+                }
                 if (str_starts_with($outcome, 'stop:')) {
+                    // A rate limit or account stop: the item was not
+                    // described, so the next run starts with it again.
                     $stop = substr($outcome, 5);
                     $counts['sent']++;
                     $counts['failures']++;
                     break;
                 }
-                if (str_starts_with($outcome, 'halt:')) {
-                    $stop = substr($outcome, 5);
-                    break;
+                $next++;
+                if (str_starts_with($outcome, 'skip:')) {
+                    $reason = substr($outcome, 5);
+                    $skipped[$reason] = ($skipped[$reason] ?? 0) + 1;
+                    continue;
                 }
                 $counts['sent']++;
                 $counts[$outcome] = ($counts[$outcome] ?? 0) + 1;
@@ -156,6 +168,9 @@ class Runner
                     $stop = self::STOP_BREAKER;
                     break;
                 }
+            }
+            if (!$dry && $ids === null && $next < count($found['candidates'])) {
+                $this->scanner->rewindTo($found['candidates'][$next]->attachmentId);
             }
             if ($stop === self::STOP_DONE && count($found['candidates']) >= $limit && $ids === null) {
                 $stop = self::STOP_RUN_CAP;
@@ -261,22 +276,48 @@ class Runner
     }
 
     /**
-     * Checks done immediately before a call: caps and spend-meter.
+     * Checks done immediately before a call: this plugin's own caps.
      */
     private function preCallReason(): ?string
     {
-        $cap = $this->capReason();
-        if ($cap !== null) {
-            return $cap;
+        return $this->capReason();
+    }
+
+    /**
+     * Asks spend-meter, when present, right before a call (case 64).
+     *
+     * @param array<string, mixed> $settings
+     * @return array{present: bool, allowed: bool, reason: string, reservation_id: ?string}
+     */
+    private function meterCheck(VisionAdapter $adapter, array $settings, \IndianOpinion\AltTextFill\Model\Prompt $prompt, int $attachmentId): array
+    {
+        $decision = Integrations::preSpend([
+            'purpose' => Integrations::PURPOSE,
+            'caller' => Integrations::CALLER,
+            'provider' => $adapter->id(),
+            'model' => self::modelOf($adapter, $settings),
+            'est_input_tokens' => (int) ceil(strlen($prompt->system . $prompt->user) / 4) + Integrations::IMAGE_TOKEN_ALLOWANCE,
+            'max_output_tokens' => $this->settings->int('max_tokens'),
+            'meta' => ['attachment_id' => $attachmentId],
+        ]);
+        if ($decision === null) {
+            return ['present' => false, 'allowed' => true, 'reason' => '', 'reservation_id' => null];
         }
-        if (Integrations::spendMeterPresent()) {
-            $allow = apply_filters(Integrations::hook('spend_check'), true, Integrations::PURPOSE, ['calls' => 1]);
-            if ($allow === false || is_wp_error($allow)) {
-                return self::STOP_SPEND;
-            }
+        if (!$decision['allowed']) {
+            $this->logger->info('spend-meter denied the call: ' . $decision['reason'] . '.', ['attachment_id' => $attachmentId]);
         }
 
-        return null;
+        return ['present' => true] + $decision;
+    }
+
+    /**
+     * @param array<string, mixed> $settings
+     */
+    private static function modelOf(VisionAdapter $adapter, array $settings): string
+    {
+        $model = is_string($settings['model'] ?? null) ? trim($settings['model']) : '';
+
+        return $model !== '' ? mb_substr($model, 0, 128) : $adapter->id();
     }
 
     /**
@@ -306,10 +347,14 @@ class Runner
         }
         $prompt = $this->prompts->build($context);
         $settings = $this->settings->adapterSettings($adapter->id());
+        $meter = $this->meterCheck($adapter, $settings, $prompt, $id);
+        if (!$meter['allowed']) {
+            return 'halt:' . self::STOP_SPEND;
+        }
         $this->field->updateState($id, ['last_tried' => $this->clock->now()]);
 
         try {
-            $response = $this->call($adapter, $prep['input'], $context, $prompt, $settings);
+            [$response, $attempt] = $this->call($adapter, $prep['input'], $context, $prompt, $settings, $meter);
         } catch (AdapterException $e) {
             return $this->onAdapterFailure($e, $id);
         } catch (\Throwable $e) {
@@ -321,30 +366,59 @@ class Runner
             return 'failures';
         }
         $this->state->recordSuccess();
-        $this->recordSpend($adapter, $response);
+        $this->recordSpend($adapter, $settings, $response, $meter, $attempt, AnswerParser::looksValid($response->rawText) ? 'ok' : 'error_billed');
 
         return $this->accept($candidate, $context, $response, $adapter->id(), $runId);
     }
 
     /**
-     * One call with one retry on a timeout or 5xx (case 31). Both count.
+     * One call with one retry on a timeout or 5xx (case 31). Both count
+     * against the daily cap, and spend-meter gets a record per attempt.
      *
      * @param array<string, mixed> $settings
+     * @param array{present: bool, allowed: bool, reason: string, reservation_id: ?string} $meter
+     * @return array{0: AdapterResponse, 1: int} The response and its attempt number.
      */
-    private function call(VisionAdapter $adapter, ImageInput $image, Context $context, \IndianOpinion\AltTextFill\Model\Prompt $prompt, array $settings): AdapterResponse
+    private function call(VisionAdapter $adapter, ImageInput $image, Context $context, \IndianOpinion\AltTextFill\Model\Prompt $prompt, array $settings, array $meter): array
     {
-        $this->state->countCall();
-        try {
-            return $adapter->describe($image, $context, $prompt, $settings);
-        } catch (AdapterException $e) {
-            if (!$e->isRetryable() || $this->capReason() !== null) {
+        for ($attempt = 1;; $attempt++) {
+            $this->state->countCall();
+            $started = $this->clock->micro();
+            try {
+                return [$adapter->describe($image, $context, $prompt, $settings), $attempt];
+            } catch (AdapterException $e) {
+                $this->meterRecordFailure($adapter, $settings, $meter, $attempt, $e->httpStatus(), $started);
+                if ($attempt >= 2 || !$e->isRetryable() || $this->capReason() !== null) {
+                    throw $e;
+                }
+                $this->logger->info('Retrying once after: ' . $e->getMessage());
+            } catch (\Throwable $e) {
+                $this->meterRecordFailure($adapter, $settings, $meter, $attempt, 0, $started);
                 throw $e;
             }
-            $this->logger->info('Retrying once after: ' . $e->getMessage());
-            $this->state->countCall();
-
-            return $adapter->describe($image, $context, $prompt, $settings);
         }
+    }
+
+    /**
+     * @param array<string, mixed> $settings
+     * @param array{present: bool, allowed: bool, reason: string, reservation_id: ?string} $meter
+     */
+    private function meterRecordFailure(VisionAdapter $adapter, array $settings, array $meter, int $attempt, int $httpStatus, float $started): void
+    {
+        if (!$meter['present']) {
+            return;
+        }
+        Integrations::recordSpend([
+            'reservation_id' => $meter['reservation_id'],
+            'purpose' => Integrations::PURPOSE,
+            'caller' => Integrations::CALLER,
+            'provider' => $adapter->id(),
+            'model' => self::modelOf($adapter, $settings),
+            'status' => 'error_unbilled',
+            'http_status' => $httpStatus,
+            'latency_ms' => (int) round(($this->clock->micro() - $started) * 1000),
+            'attempt' => $attempt,
+        ]);
     }
 
     private function onAdapterFailure(AdapterException $e, int $attachmentId): string
@@ -375,7 +449,14 @@ class Runner
         do_action('alt_text_fill_paused', self::STOP_BREAKER);
     }
 
-    private function recordSpend(VisionAdapter $adapter, AdapterResponse $response): void
+    /**
+     * Prices the call for the money cap (ruling 4) and records it with
+     * spend-meter when present.
+     *
+     * @param array<string, mixed> $settings
+     * @param array{present: bool, allowed: bool, reason: string, reservation_id: ?string} $meter
+     */
+    private function recordSpend(VisionAdapter $adapter, array $settings, AdapterResponse $response, array $meter, int $attempt, string $status): void
     {
         $cost = null;
         if ($this->pricesSet()) {
@@ -388,13 +469,21 @@ class Runner
             }
             $this->state->addCost($cost);
         }
-        if (Integrations::spendMeterPresent()) {
-            do_action(Integrations::hook('spend_record'), Integrations::PURPOSE, [
-                'adapter' => $adapter->id(),
-                'model' => $response->model,
-                'input_tokens' => $response->inputTokens,
-                'output_tokens' => $response->outputTokens,
-                'estimated_cost' => $cost,
+        $this->lastCost = $cost;
+        $this->lastMetered = $meter['present'];
+        if ($meter['present']) {
+            Integrations::recordSpend([
+                'reservation_id' => $meter['reservation_id'],
+                'purpose' => Integrations::PURPOSE,
+                'caller' => Integrations::CALLER,
+                'provider' => $adapter->id(),
+                'model' => $response->model !== '' ? mb_substr($response->model, 0, 128) : self::modelOf($adapter, $settings),
+                'status' => $status,
+                'http_status' => $response->httpStatus,
+                'input_tokens' => (int) $response->inputTokens,
+                'output_tokens' => (int) $response->outputTokens,
+                'latency_ms' => (int) round($response->latency * 1000),
+                'attempt' => $attempt,
             ]);
         }
     }
@@ -487,12 +576,32 @@ class Runner
     }
 
     /**
-     * Runs one queued job (case 65). The caps and the switch still apply.
+     * Hands one candidate to gen-queue (case 65). The idempotency key is
+     * the attachment ID, the file hash and the number of answers already
+     * stored for it, so a queued image is not queued twice, and an image
+     * that needs a new answer later (expired, tried again) gets a new job.
+     */
+    private function enqueue(Candidate $candidate, string $runId): bool
+    {
+        $id = $candidate->attachmentId;
+        $key = 'alt-text-fill:' . $id . ':' . Fingerprint::of($id) . ':' . $this->repository->countSuggestions(['attachment_id' => $id]);
+        $job = Integrations::enqueue(['attachment_id' => $id, 'run_id' => $runId], ['idempotency_key' => $key, 'on_conflict' => 'requeue', 'source' => Integrations::CALLER]);
+
+        return $job !== null;
+    }
+
+    /**
+     * Runs one queued job (case 65). The switch, the caps and the run lock
+     * still apply, so a queue worker and a run never spend at once.
      *
-     * @param array<string, mixed> $payload
+     * Returns the same outcomes as processOne(), plus "halt:locked".
+     *
+     * @param array<mixed> $payload
      */
     public function handleJob(array $payload): string
     {
+        $this->lastCost = null;
+        $this->lastMetered = false;
         $id = (int) ($payload['attachment_id'] ?? 0);
         $adapter = $this->adapters->active();
         try {
@@ -502,16 +611,37 @@ class Runner
         } catch (ConfigException $e) {
             return 'halt:config';
         }
-        $candidate = $this->scanner->evaluate($id, false);
-        if (!$candidate instanceof Candidate) {
-            return 'skip:' . (is_string($candidate) ? $candidate : 'has alt');
+        $token = $this->state->acquireLock(self::LOCK_TTL);
+        if ($token === null) {
+            return 'halt:' . self::STOP_LOCKED;
         }
+        try {
+            $candidate = $this->scanner->evaluate($id, false);
+            if (!$candidate instanceof Candidate) {
+                return 'skip:' . (is_string($candidate) ? $candidate : 'has alt');
+            }
 
-        return $this->processOne($candidate, (string) $adapter?->id(), (string) ($payload['run_id'] ?? 'queue'));
+            return $this->processOne($candidate, (string) $adapter?->id(), (string) ($payload['run_id'] ?? 'queue'));
+        } finally {
+            $this->state->releaseLock($token);
+        }
+    }
+
+    /** Cost of the last priced call made by handleJob(), or null. */
+    public function lastCost(): ?float
+    {
+        return $this->lastCost;
+    }
+
+    /** True when spend-meter recorded the last call made by handleJob(). */
+    public function lastMetered(): bool
+    {
+        return $this->lastMetered;
     }
 
     /**
-     * "Test connection": one small built-in image, counted against the daily cap.
+     * "Test connection": one small built-in image, counted against the daily
+     * cap and checked with spend-meter like any call.
      *
      * @return array{ok: bool, message: string, raw: string}
      */
@@ -524,30 +654,46 @@ class Runner
         if ($this->switches->reason() !== null) {
             return ['ok' => false, 'message' => 'The kill switch is on.', 'raw' => ''];
         }
-        if ($this->capReason() !== null) {
-            return ['ok' => false, 'message' => 'Today\'s cap is reached.', 'raw' => ''];
-        }
         $settings = $this->settings->adapterSettings($adapter->id());
         $errors = $adapter->validateSettings($settings);
         if ($errors !== []) {
             return ['ok' => false, 'message' => implode(' ', $errors), 'raw' => ''];
         }
-        $bytes = (string) base64_decode(TestImage::PNG_BASE64, true);
-        $image = new ImageInput($bytes, null, 'image/png', TestImage::WIDTH, TestImage::HEIGHT, strlen($bytes), 'test');
-        $context = new Context('', $this->contexts->language(0), 0, false, false);
-        $this->state->countCall();
-        try {
-            $response = $adapter->describe($image, $context, $this->prompts->build($context), $settings);
-        } catch (AdapterException $e) {
-            return ['ok' => false, 'message' => Redactor::redact($e->getMessage()), 'raw' => ''];
+        $token = $this->state->acquireLock(self::LOCK_TTL);
+        if ($token === null) {
+            return ['ok' => false, 'message' => 'A run is in progress; try again when it ends.', 'raw' => ''];
         }
-        $this->recordSpend($adapter, $response);
         try {
-            $answer = AnswerParser::parse($response->rawText);
-        } catch (MalformedAnswerException $e) {
-            return ['ok' => false, 'message' => 'The provider answered, but not with a JSON object.', 'raw' => mb_substr($response->rawText, 0, 300)];
-        }
+            if ($this->capReason() !== null) {
+                return ['ok' => false, 'message' => 'Today\'s cap is reached.', 'raw' => ''];
+            }
+            $bytes = (string) base64_decode(TestImage::PNG_BASE64, true);
+            $image = new ImageInput($bytes, null, 'image/png', TestImage::WIDTH, TestImage::HEIGHT, strlen($bytes), 'test');
+            $context = new Context('', $this->contexts->language(0), 0, false, false);
+            $prompt = $this->prompts->build($context);
+            $meter = $this->meterCheck($adapter, $settings, $prompt, 0);
+            if (!$meter['allowed']) {
+                return ['ok' => false, 'message' => 'spend-meter denied the call (' . $meter['reason'] . ').', 'raw' => ''];
+            }
+            $this->state->countCall();
+            $started = $this->clock->micro();
+            try {
+                $response = $adapter->describe($image, $context, $prompt, $settings);
+            } catch (AdapterException $e) {
+                $this->meterRecordFailure($adapter, $settings, $meter, 1, $e->httpStatus(), $started);
 
-        return ['ok' => true, 'message' => $answer->alt, 'raw' => mb_substr($response->rawText, 0, 300)];
+                return ['ok' => false, 'message' => Redactor::redact($e->getMessage()), 'raw' => ''];
+            }
+            $valid = AnswerParser::looksValid($response->rawText);
+            $this->recordSpend($adapter, $settings, $response, $meter, 1, $valid ? 'ok' : 'error_billed');
+            if (!$valid) {
+                return ['ok' => false, 'message' => 'The provider answered, but not with a JSON object.', 'raw' => Redactor::redact(mb_substr($response->rawText, 0, 300))];
+            }
+            $answer = AnswerParser::parse($response->rawText);
+
+            return ['ok' => true, 'message' => $answer->alt, 'raw' => Redactor::redact(mb_substr($response->rawText, 0, 300))];
+        } finally {
+            $this->state->releaseLock($token);
+        }
     }
 }

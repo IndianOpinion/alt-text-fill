@@ -108,14 +108,32 @@ final class ModelCallTest extends TestCase
 
     public function testT28PromptFilterAndPromptLibraryOverride(): void
     {
-        add_filter('prompt_library_render', static fn ($t, string $slug): ?string => $slug === 'alt-v2' ? 'LIBRARY PROMPT' : null, 10, 2);
+        $seen = [];
+        add_filter('promptlib_render', static function ($t, string $slug, array $values, $version, array $options) use (&$seen): ?array {
+            $seen = [$values, $version, $options];
+
+            return $slug === 'alt-v2' ? ['system' => 'LIBRARY PROMPT', 'user' => 'ignored', 'slug' => $slug, 'version' => 3] : null;
+        }, 10, 5);
         $this->settings(['prompt_slug' => 'alt-v2']);
         $prompt = $this->c->prompts->build(new Context('', 'en', 0, false, false));
         self::assertSame('LIBRARY PROMPT', $prompt->system);
         self::assertSame('prompt-library:alt-v2', $prompt->source);
+        self::assertSame(['max_length' => 125, 'language' => 'en'], $seen[0]);
+        self::assertSame('live', $seen[1]);
+        self::assertSame(['consumer' => 'alt-text-fill'], $seen[2]);
+        self::assertStringContainsString(PromptBuilder::OPEN, $prompt->user, 'the context block stays the plugin\'s own');
 
         add_filter('alt_text_fill_prompt', static fn (Prompt $p): Prompt => new Prompt('FILTERED', $p->user, 'filter'));
         self::assertSame('FILTERED', $this->c->prompts->build(new Context('', 'en', 0, false, false))->system);
+    }
+
+    public function testT28PromptLibraryErrorFallsBackToTheBuiltInPromptAndLogs(): void
+    {
+        add_filter('promptlib_render', static fn () => new \WP_Error('promptlib_not_found', 'No template alt-v9.'));
+        $this->settings(['prompt_slug' => 'alt-v9']);
+        $prompt = $this->c->prompts->build(new Context('', 'en', 0, false, false));
+        self::assertSame('built-in', $prompt->source);
+        self::assertStringContainsString('No template alt-v9.', implode("\n", $this->logger->written));
     }
 
     public function testT28ContextCannotCloseTheDelimiter(): void

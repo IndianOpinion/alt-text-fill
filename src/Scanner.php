@@ -115,7 +115,7 @@ class Scanner
      * @param list<int>|null $ids Explicit attachment IDs instead of the cursor.
      * @return array{candidates: list<Candidate>, skipped: array<string, int>, reasons: array<int, string>, considered: int}
      */
-    public function collect(int $want, bool $includeRejected = false, ?array $ids = null, int $maxPages = 20): array
+    public function collect(int $want, bool $includeRejected = false, ?array $ids = null, int $maxPages = 20, bool $persist = true): array
     {
         $candidates = [];
         $skipped = [];
@@ -139,8 +139,14 @@ class Scanner
 
             return ['candidates' => $candidates, 'skipped' => $skipped, 'reasons' => $reasons, 'considered' => $considered];
         }
+        // A dry run reads from the stored cursor but never moves it, so the
+        // real run that follows starts where the dry run looked (case 59).
+        $after = (int) $this->state->all()['cursor'];
         for ($page = 0; $page < $maxPages && count($candidates) < $want; $page++) {
-            $report = $this->scan(['include_rejected' => $includeRejected]);
+            $report = $persist
+                ? $this->scan(['include_rejected' => $includeRejected])
+                : $this->scan(['include_rejected' => $includeRejected, 'after_id' => $after]);
+            $after = $report->cursor;
             $considered += $report->considered;
             foreach ($report->candidates as $candidate) {
                 $candidates[] = $candidate;
@@ -154,7 +160,19 @@ class Scanner
             }
         }
 
+        if ($persist && count($candidates) > $want) {
+            // The last page held more candidates than this run takes; move
+            // the cursor back so the rest are seen next time, not next cycle.
+            $this->rewindTo($candidates[$want]->attachmentId);
+        }
+
         return ['candidates' => array_slice($candidates, 0, $want), 'skipped' => $skipped, 'reasons' => $reasons, 'considered' => $considered];
+    }
+
+    /** Sets the scan cursor so the next page starts at this attachment. */
+    public function rewindTo(int $attachmentId): void
+    {
+        $this->state->update(['cursor' => max(0, $attachmentId - 1)]);
     }
 
     /**
