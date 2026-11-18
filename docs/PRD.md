@@ -487,6 +487,14 @@ URL, model and API key are settings; the API key may instead come from the
 constant `ALT_TEXT_FILL_API_KEY` or an environment variable of the same
 name, which wins over the stored setting.
 
+Build note (0.1.0, accepted at review): the reference adapter does not use
+`indianopinion/llm-json-php`. That library's 0.1.0 request takes message
+content as a string only, so it cannot carry an image part. The adapter
+makes its one call through the WordPress HTTP API instead, and the filter
+`alt_text_fill_http_caller` lets a site plug in its own caller. When
+llm-json-php can carry images, an adapter built on it registers through
+`alt_text_fill_adapters` like any other.
+
 ### 5.4 Actions
 
 | action | arguments |

@@ -1,0 +1,4 @@
+# Run alt-text-fill from system cron instead of WP-Cron.
+# Every 15 minutes, at most 20 images, at most 120 seconds, as an editor account.
+# Exit code 2 means a cap or the kill switch refused the run; that is not an error.
+*/15 * * * * www-data cd /var/www/example && wp alt-text-fill run --limit=20 --time=120 --user=editor --quiet || [ $? -eq 2 ]
