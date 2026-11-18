@@ -6,7 +6,7 @@ Written from scratch; not derived from any third-party plugin.
 
 This project came out of the work on indianopinion.org and is written from scratch; it is independent of and not affiliated with any third-party plugin it integrates with.
 
-Measured: on MySQL 8.0 with 200,000 attachments, one 500-item scan page took 2 to 9 ms warm and 47 ms cold. The approval-rate line (share approved without edits, share rejected) is recorded here after the first run against a real model; 0.1.0 has none yet.
+Measured: on MySQL 8.0 with 200,000 attachments, one 500-item scan page took 2 to 9 ms warm and 47 ms cold.
 
 ## Contents
 
@@ -123,7 +123,7 @@ More detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/PRD.md`](
 
 ## Hooks
 
-Filters: `alt_text_fill_adapters`, `alt_text_fill_mime_types`, `alt_text_fill_is_candidate` (can only exclude), `alt_text_fill_weak_alt_patterns`, `alt_text_fill_context_posts`, `alt_text_fill_context`, `alt_text_fill_post_language`, `alt_text_fill_prompt`, `alt_text_fill_openers`, `alt_text_fill_refusal_patterns`, `alt_text_fill_validate` (can only reject or flag), `alt_text_fill_review_capability` (`upload_files`), `alt_text_fill_admin_capability` (`manage_options`), `alt_text_fill_shared_threshold`, `alt_text_fill_cron_interval`, `alt_text_fill_retention_days`, `alt_text_fill_scaler`, `alt_text_fill_http_caller`, `alt_text_fill_integration_hooks`.
+Filters: `alt_text_fill_adapters`, `alt_text_fill_mime_types`, `alt_text_fill_is_candidate` (can only exclude), `alt_text_fill_weak_alt_patterns`, `alt_text_fill_context_posts`, `alt_text_fill_context`, `alt_text_fill_post_language`, `alt_text_fill_prompt`, `alt_text_fill_openers`, `alt_text_fill_refusal_patterns`, `alt_text_fill_validate` (can only reject or flag), `alt_text_fill_review_capability` (`upload_files`), `alt_text_fill_admin_capability` (`manage_options`), `alt_text_fill_shared_threshold`, `alt_text_fill_cron_interval`, `alt_text_fill_retention_days`, `alt_text_fill_scaler`, `alt_text_fill_http_caller`, `alt_text_fill_max_pixels` (25 million; larger declared canvases are never decoded).
 
 Actions: `alt_text_fill_run_started`, `alt_text_fill_run_finished`, `alt_text_fill_suggestion_created`, `alt_text_fill_answer_rejected`, `alt_text_fill_written`, `alt_text_fill_undone`, `alt_text_fill_paused`, `alt_text_fill_log`.
 
@@ -131,7 +131,13 @@ PHP functions: `alt_text_fill_is_empty()`, `alt_text_fill_scan()`, `alt_text_fil
 
 A custom adapter implements `IndianOpinion\AltTextFill\Adapter\VisionAdapter` and registers through `alt_text_fill_adapters`; see [`examples/custom-adapter.php`](examples/custom-adapter.php). The reference adapter does its HTTP through `wp_remote_post()`, or through a callable you return from `alt_text_fill_http_caller` if your site has its own caller.
 
-Optional companions, used only when present and never required: **spend-meter** (every call is checked with its pre-spend filter, purpose `alt_text_fill.describe`, and recorded after), **gen-queue** (opt in; one job per image with an idempotency key of attachment ID and file hash) and **prompt-library** (a template slug replaces the built-in prompt). The hook names assumed for them are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and can be remapped with `alt_text_fill_integration_hooks`. This plugin's own caps and switch apply in every case.
+Optional companions, used only when present and never required, through their released 0.1.0 hooks:
+
+- **spend-meter** (contract `SPEND_METER_API` = 1): before every call the `spend_meter_pre_spend` filter gets `null` and an intent array (purpose `alt_text_fill.describe`, caller `alt-text-fill`, provider = adapter ID, model, estimated tokens). `null` back means no meter; a call is made only when `allowed` is exactly `true`. Every attempt, retries and failures included, is recorded with `spend_meter_record` under the same `reservation_id`. A meter with another contract version, or an answer that is not a decision array, denies the call.
+- **gen-queue** (opt in): each image is offered to `gen_queue_enqueue_job` as job type `alt_text_fill.describe`, keyed by attachment ID, file hash and the number of answers stored so far, with `on_conflict` `requeue`. The type is registered on `gen_queue_register_types`. A job that meets a cap, the switch or a running run asks the queue to retry later.
+- **prompt-library**: with a template slug set, `promptlib_render` renders it with `max_length` and `language`; its system part replaces the built-in system prompt. The user part with the delimited context block stays this plugin's own.
+
+This plugin's own caps and switch apply in every case. Only one spender runs at a time per site: runs, queue jobs and "Test connection" share one run lock.
 
 ## WP-CLI
 
@@ -185,7 +191,7 @@ Images, and a slice of the text of the post that uses each one, leave your site 
 ```sh
 composer install
 composer test          # PHPUnit: unit suite with a WordPress stub layer
-composer stan          # PHPStan level 6
+composer stan          # PHPStan level 8
 composer cs            # PHPCS, PSR-12
 ```
 

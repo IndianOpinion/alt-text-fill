@@ -43,20 +43,25 @@ All code is in `src/`, namespace `IndianOpinion\AltTextFill`, loaded by
 Runner::run
   assertCanSpend: settings readable, switch off, not dry-run-only,
                   breaker closed, no Retry-After wait, adapter set and valid, caps
-  State::acquireLock (atomic add_option; a stale lock is broken and logged)
-  Scanner::collect -> Candidate[] (post and meta rows only, from the cursor)
+  State::acquireLock (INSERT IGNORE; a stale lock is taken over by a
+                     compare-and-swap UPDATE, and logged)
+  Scanner::collect -> Candidate[] (post and meta rows only, from the cursor;
+                     a dry run never moves the cursor)
   for each candidate:
-      haltReason: settings, switch, breaker, time budget
-      [gen-queue opted in and present] -> enqueue job, continue
+      haltReason: settings, switch, breaker, time budget; refresh the lock
+      [gen-queue opted in] -> gen_queue_enqueue_job; a job ID means queued
       ContextBuilder::build -> Context
       ImagePreparer::prepare -> ImageInput or a skip reason
-      preCallReason: daily cap, money cap, spend-meter pre-spend
-      State::countCall; adapter->describe (one retry on timeout or 5xx)
+      preCallReason: daily cap, money cap
+      spend_meter_pre_spend (null = no meter; allowed must be exactly true)
+      State::countCall; adapter->describe (one retry on timeout or 5xx;
+                     spend_meter_record per attempt, same reservation)
           account error -> pause "provider account", stop
           429 -> wait for Retry-After, stop "rate limited"
           other -> failure; five in a row -> breaker, stop
       record cost (tokens x operator prices) and spend-meter usage
       AnswerParser + Validator -> pending suggestion, or an invalid row
+  on an early stop, move the cursor back to the first unhandled candidate
   save the run record, release the lock (finally)
 ```
 
@@ -120,19 +125,43 @@ Where the PRD left room, these choices were made. Each has a test.
    `fn(string $url, array $args): array|WP_Error` to use your own caller.
    When llm-json-php gains image parts, an adapter on top of it is a
    drop-in through `alt_text_fill_adapters`.
-2. **Companion hook names.** spend-meter, gen-queue and prompt-library
-   are reached through these names, all remappable with
-   `alt_text_fill_integration_hooks`:
-   - `spend_meter_pre_spend` filter `(true, 'alt_text_fill.describe', ['calls' => 1])`;
-     `false` or a `WP_Error` denies.
-   - `spend_meter_record` action `('alt_text_fill.describe', usage array)`.
-   - `gen_queue_enqueue` filter `(null, 'alt_text_fill.describe', payload, ['idempotency_key' => ...])`;
-     a job ID means queued, null means not handled (the plugin then runs
-     the item itself).
-   - `gen_queue_run_alt_text_fill.describe` action `(payload)` runs one job.
-   - `prompt_library_render` filter `(null, slug, vars)`; a string replaces
-     the system prompt.
-   Presence is `has_filter()` on the check and enqueue names.
+2. **Companion contracts.** The hooks are the released 0.1.0 public
+   interfaces of the three companions (read from their PRDs and READMEs,
+   checked at review):
+   - spend-meter, contract `SPEND_METER_API` = 1. Filter
+     `spend_meter_pre_spend` with `null` and an intent array (`purpose`
+     `alt_text_fill.describe`, `caller` `alt-text-fill`, `provider` the
+     adapter ID, `model`, `est_input_tokens` from the prompt length plus a
+     1,000-token image allowance, `max_output_tokens`, `meta` with the
+     attachment ID). `null` back means no meter. The call is made only when
+     `allowed` is exactly `true`. Fail closed: a different contract
+     version, a filter that throws, or a result that is not a decision
+     array denies. Action `spend_meter_record` with a call array after
+     every attempt, retries and failures included, carrying the
+     `reservation_id`: `ok`, `error_billed` for a 200 whose body is not a
+     JSON answer, `error_unbilled` for a failed request. Action
+     `spend_meter_release` is available through
+     `Integrations::releaseSpend()`; the runner never needs it, because
+     nothing stands between an allowed check and the call.
+   - gen-queue. Soft enqueue through the filter `gen_queue_enqueue_job`
+     `(null, 'alt_text_fill.describe', payload, args)`; an int is a job ID,
+     anything else means the plugin runs the item itself. The idempotency
+     key is `alt-text-fill:<attachment>:<file hash>:<answers stored>`, with
+     `on_conflict` `requeue`: an image already queued is not queued twice,
+     and an image that needs a fresh answer later (expired, tried again)
+     gets a new job instead of the old finished one. The type is registered
+     on `gen_queue_register_types` with `gen_queue_register_type()`. The
+     handler throws gen-queue's `RetryableException` when a cap, the switch
+     or the run lock halts it, and `AccountException` on a provider account
+     error, so a halted job is never reported as done. It reports cost with
+     `addCost()`, marked `metered` when spend-meter already recorded it.
+   - prompt-library. Filter `promptlib_render`
+     `(null, slug, ['max_length', 'language'], 'live', ['consumer' => 'alt-text-fill'])`.
+     The rendered system part (or the user part when the system part is
+     empty) replaces the built-in system prompt. A `WP_Error` is logged and
+     the built-in prompt is used. The user message with the delimited
+     context stays this plugin's own, so case 20 holds whatever a template
+     says.
 3. **Rejected model answers** are stored as suggestion rows with status
    `invalid` and the reason, so the history is complete; they are never
    approvable and are hidden from the default review view.
@@ -145,9 +174,16 @@ Where the PRD left room, these choices were made. Each has a test.
    next item does not start when the budget is spent or less than the
    request timeout remains. Without this, the defaults (25 s budget, 30 s
    timeout) would never start anything.
-7. **Run lock** is its own option taken with `add_option()`, which is an
-   atomic insert, rather than a field inside the state option. A lock past
-   its expiry (10 minutes) is broken and logged.
+7. **Run lock** is its own row in the options table, written in SQL:
+   `INSERT IGNORE` takes it, and a lock past its expiry (10 minutes) is
+   taken over with an `UPDATE ... WHERE option_value = <the stale value>`,
+   so of two processes that see the same stale lock only one wins.
+   `add_option()` is not used because it upserts: two racing callers can
+   both be told they won. The holder refreshes the expiry before every
+   item, so a long WP-CLI run is not mistaken for a stale one; a run that
+   finds its lock gone stops with "lock lost". Queue jobs and "Test
+   connection" take the same lock, which is what keeps the daily and
+   money caps exact: only one spender checks and counts at a time.
 8. **Kill switch storage.** Its own small autoloaded option
    (`alt_text_fill_switch`); the state option is not autoloaded. A truthy
    `ALT_TEXT_FILL_DISABLED` wins over the setting; a false constant does
@@ -196,10 +232,27 @@ Where the PRD left room, these choices were made. Each has a test.
     to every language.
 21. **The "parked" count** on the status block is a meta search over the
     plugin's own state key, good enough for a status line.
-22. **Static analysis** runs at PHPStan level 6 with
+22. **Static analysis** runs at PHPStan level 8 (raised at review; table
+    names go through `%i` placeholders so every prepared query is a
+    literal string) with
     `treatPhpDocTypesAsCertain: false`, because WordPress docblocks
     promise types the runtime does not always keep, and the defensive
     checks stay.
+
+23. **Scan cursor.** A dry run reads from the stored cursor but never moves
+    it, so the real run that follows looks at the same images. When a run
+    stops early, or a page held more candidates than the run takes, the
+    cursor is moved back to the first candidate not handled, so nothing
+    waits a whole cycle. A rate-limit or account stop counts as not
+    handled: that image is first in the next run.
+24. **Decoding ceiling.** An image whose declared canvas is over 25 million
+    pixels (filter `alt_text_fill_max_pixels`), or whose size cannot be
+    read, is never handed to GD or Imagick; it is skipped as "too large".
+    A few kilobytes can declare a canvas that needs gigabytes to decode.
+25. **Undo of an undo** clears the "undone" mark on the original entry, so
+    a later undo by run or by time takes the original write back again.
+26. **Decorative approval** re-reads the alt like any approval (case 43):
+    an editor's text is never overridden by a marker.
 
 ## Testing
 

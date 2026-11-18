@@ -21,7 +21,7 @@ No WordPress install is needed: the tests run against a stub layer in
 
 ```sh
 composer test        # unit suite, plus integration when a database is set
-composer stan        # PHPStan level 6
+composer stan        # PHPStan level 8
 composer cs          # PHPCS (PSR-12); composer cbf fixes what it can
 ```
 
