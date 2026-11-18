@@ -94,6 +94,49 @@ final class ImageTest extends TestCase
         self::assertSame(2000, $small['input']->width);
     }
 
+    public function testT22DecompressionBombIsNeverDecoded(): void
+    {
+        // A valid PNG header that declares a 30,000 x 30,000 canvas in a few bytes.
+        $ihdr = pack('NNCCCCC', 30000, 30000, 8, 6, 0, 0, 0);
+        $bomb = "\x89PNG\r\n\x1a\n" . pack('N', 13) . 'IHDR' . $ihdr . pack('N', crc32('IHDR' . $ihdr)) . str_repeat("\0", 64);
+        $this->attachment(23, ['width' => 30000, 'height' => 30000, 'bytes' => $bomb, 'mime' => 'image/png']);
+        $spy = new class () implements \IndianOpinion\AltTextFill\Image\Scaler {
+            public int $calls = 0;
+
+            public function name(): string
+            {
+                return 'spy';
+            }
+
+            public function scale(string $bytes, int $longSide): ?array
+            {
+                $this->calls++;
+
+                return null;
+            }
+        };
+        add_filter('alt_text_fill_scaler', static fn () => $spy);
+
+        self::assertSame(ImagePreparer::SKIP_TOO_LARGE, $this->prepare(23)['reason']);
+        self::assertSame(0, $spy->calls);
+    }
+
+    public function testT24ProtocolRelativeRedirectIsCheckedAgainstTheHostList(): void
+    {
+        $hops = [];
+        \WP::$http = static function (string $method, string $url) use (&$hops): array {
+            $hops[] = $url;
+
+            return ['response' => ['code' => 302], 'headers' => ['location' => '//internal.example/secret.jpg'], 'body' => ''];
+        };
+        $fetcher = new \IndianOpinion\AltTextFill\Image\RemoteFetcher();
+        $result = $fetcher->fetch(\WP::$uploadsBase . '/x.jpg', 1000);
+
+        self::assertFalse($result['ok']);
+        self::assertSame('host not allowed', $result['reason']);
+        self::assertCount(1, $hops);
+    }
+
     public function testT23Base64ByDefault(): void
     {
         $this->attachment(30, ['width' => 800, 'height' => 600]);

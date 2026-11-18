@@ -41,14 +41,16 @@ class Review
     public function approve(int $suggestionId, ?string $edited = null): Entry
     {
         $s = $this->pending($suggestionId);
-        if ($s->kind === Suggestion::KIND_DECORATIVE && $edited === null) {
-            return $this->markDecorative($s->attachmentId, $s);
-        }
+        // Case 43 applies to every approval, the decorative kind included:
+        // an alt an editor typed meanwhile is never overridden.
         $current = $this->field->read($s->attachmentId);
         $weakStill = $s->previousAlt !== '' && $current === $s->previousAlt;
         if ($current !== null && !Text::isBlank($current) && !$weakStill) {
             $this->repository->updateSuggestion($s->id, ['status' => Suggestion::SUPERSEDED, 'decided' => $this->clock->now(), 'decided_by' => (int) get_current_user_id()]);
             throw new ConflictException('Someone filled the alt text since this suggestion was made. Nothing was written.', null, $current);
+        }
+        if ($s->kind === Suggestion::KIND_DECORATIVE && $edited === null) {
+            return $this->markDecorative($s->attachmentId, $s);
         }
         $final = $s->text;
         $action = Entry::APPROVE;

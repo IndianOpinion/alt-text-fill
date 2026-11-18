@@ -136,6 +136,20 @@ final class ReviewTest extends TestCase
         self::assertStringContainsString('superseded', (new ReviewScreen($this->c))->render(['status' => 'superseded']));
     }
 
+    public function testT42DecorativeApprovalAfterAnEditorFilledTheFieldIsSuperseded(): void
+    {
+        $id = $this->suggestion(10, '', ['kind' => Suggestion::KIND_DECORATIVE]);
+        update_post_meta(10, '_wp_attachment_image_alt', 'Written by an editor');
+
+        $this->expectException(ConflictException::class);
+        try {
+            $this->c->review->approve($id);
+        } finally {
+            self::assertFalse($this->c->field->isDecorative(10));
+            self::assertSame(Suggestion::SUPERSEDED, $this->repo->getSuggestion($id)?->status);
+        }
+    }
+
     public function testT42WeakAltReplacementIsNotSuperseded(): void
     {
         $this->settings(['weak_alt' => true]);

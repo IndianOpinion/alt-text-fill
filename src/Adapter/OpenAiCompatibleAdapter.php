@@ -108,6 +108,10 @@ class OpenAiCompatibleAdapter implements VisionAdapter
         foreach (self::headers((string) ($settings['extra_headers'] ?? '')) as $name => $value) {
             if (strcasecmp($name, 'authorization') !== 0) {
                 $headers[$name] = $value;
+                if (preg_match('/key|token|auth|secret|signature|password/i', $name) === 1) {
+                    // Gateways that take a key in their own header: keep it out of logs too.
+                    Redactor::register($value);
+                }
             }
         }
 

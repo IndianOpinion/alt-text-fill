@@ -159,6 +159,12 @@ final class UndoTest extends TestCase
 
         self::assertSame('A pier in fog', $this->alt(10));
         self::assertCount(3, $this->repo->findEntries(['attachment_id' => 10]));
+
+        // The original write is live again, so undo by run takes it back.
+        self::assertFalse($this->repo->getEntry($e->id)?->isUndone());
+        $report = $this->c->undo->run($e->runId);
+        self::assertSame(1, $report->restored);
+        self::assertNull($this->alt(10));
     }
 
     public function testT55WritesAndUndosChangeOnlyTheAltField(): void

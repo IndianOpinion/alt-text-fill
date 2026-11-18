@@ -125,6 +125,13 @@ class Undo
             return ['entry' => $entry->id, 'result' => 'refused', 'message' => $e->getMessage()];
         }
         $this->repository->markEntryUndone($entry->id, $undo->id);
+        if ($entry->action === Entry::UNDO && $entry->undoes > 0) {
+            // Undoing an undo puts the original write back in place, so the
+            // original entry is live again and can be undone by entry, run
+            // or time. Left marked "undone", a later undo by run would skip
+            // it and leave the plugin's text in place.
+            $this->repository->markEntryUndone($entry->undoes, 0);
+        }
         $this->field->updateState($entry->attachmentId, ['hold' => true]);
         $original = $this->repository->getEntry($entry->id) ?? $entry;
         do_action('alt_text_fill_undone', $undo, $original);

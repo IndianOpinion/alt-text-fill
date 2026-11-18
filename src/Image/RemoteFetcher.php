@@ -71,7 +71,13 @@ class RemoteFetcher
                 if ($location === '') {
                     return ['ok' => false, 'bytes' => '', 'reason' => 'file missing'];
                 }
-                $url = str_starts_with($location, '/') ? self::origin($url) . $location : $location;
+                if (str_starts_with($location, '//')) {
+                    $url = ((string) wp_parse_url($url, PHP_URL_SCHEME) ?: 'https') . ':' . $location;
+                } elseif (str_starts_with($location, '/')) {
+                    $url = self::origin($url) . $location;
+                } else {
+                    $url = $location;
+                }
                 continue;
             }
             if ($status !== 200) {

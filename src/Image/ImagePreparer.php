@@ -19,6 +19,7 @@ class ImagePreparer
     public const SKIP_MISSING = 'file missing';
     public const SKIP_TOO_LARGE = 'too large';
     public const SKIP_ANIMATED = 'animated image';
+    public const MAX_PIXELS = 25000000;
 
     private ?Scaler $scaler = null;
     private bool $scalerResolved = false;
@@ -115,6 +116,14 @@ class ImagePreparer
         $scaled = false;
         $long = max($out['width'], $out['height']);
         $needsScale = $long > $target || strlen($bytes) > $limit;
+        if ($needsScale && $scaler !== null && !$this->safeToDecode($out['width'], $out['height'])) {
+            // A small file can declare a huge canvas (a decompression bomb).
+            // Decoding it would exhaust memory and kill the run, so it is
+            // never handed to the scaler.
+            $this->logger->warning('Skipped an image whose declared size is too large to decode safely.', ['attachment_id' => $id]);
+
+            return array_merge($out, ['reason' => self::SKIP_TOO_LARGE, 'bytes' => strlen($bytes)]);
+        }
         if ($needsScale && $scaler !== null) {
             $result = $scaler->scale($bytes, min($target, $long > 0 ? $long : $target));
             if ($result !== null) {
@@ -134,6 +143,21 @@ class ImagePreparer
         $input = new ImageInput($bytes, null, $real, $out['width'], $out['height'], strlen($bytes), $size['name'], $scaled);
 
         return array_merge($out, ['input' => $input, 'bytes' => strlen($bytes), 'mime' => $real]);
+    }
+
+    /**
+     * Pixel ceiling for decoding: default 25 million pixels (about 100 MB
+     * of GD memory), filter alt_text_fill_max_pixels. Unknown dimensions
+     * are not decoded either.
+     */
+    private function safeToDecode(int $width, int $height): bool
+    {
+        if ($width <= 0 || $height <= 0) {
+            return false;
+        }
+        $max = (int) apply_filters('alt_text_fill_max_pixels', self::MAX_PIXELS);
+
+        return $width * $height <= max(1, $max);
     }
 
     /**
